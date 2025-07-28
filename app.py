@@ -11,9 +11,19 @@ import os
 import random
 import urllib.parse
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import platform
 
 # Initialize the Flask app
 app = Flask(__name__)
+
+# Timeout configuration
+SCRAPING_TIMEOUT = 240  # 4 minutes total timeout
+INDIVIDUAL_SEARCH_TIMEOUT = 60  # 1 minute per search
+
+class TimeoutException(Exception):
+    pass
 
 # Health check endpoint for Render
 @app.route('/', methods=['GET'])
@@ -24,17 +34,56 @@ def health_check():
 def health():
     return jsonify({"status": "ok"}), 200
 
-# Define the /scrape endpoint
+# Define the /scrape endpoint with timeout protection
 @app.route('/scrape', methods=['POST'])
 def scrape_linkedin_profiles():
-    data = request.get_json()
-    if not data or 'company' not in data:
-        return jsonify({"error": "Company name not provided"}), 400
+    try:
+        data = request.get_json()
+        if not data or 'company' not in data:
+            return jsonify({"error": "Company name not provided"}), 400
+        
+        company_name = data['company']
+        row_number = data.get('row_number', 2)
+        
+        # Use thread pool for timeout control (cross-platform)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(scrape_with_selenium, company_name, row_number)
+            try:
+                result = future.result(timeout=SCRAPING_TIMEOUT)
+                return jsonify(result)
+            except FutureTimeoutError:
+                return jsonify({
+                    "error": "Scraping timeout - operation took too long",
+                    "excel_data": [{
+                        "row_number": row_number,
+                        "Company Name": company_name,
+                        "Status": "Timeout Error",
+                        **{f"SDE {i} Name": "" for i in range(1, 6)},
+                        **{f"SDE {i} URL": "" for i in range(1, 6)},
+                        **{f"HR {i} Name": "" for i in range(1, 3)},
+                        **{f"HR {i} URL": "" for i in range(1, 3)}
+                    }]
+                }), 200
+                
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return jsonify({
+            "error": str(e),
+            "excel_data": [{
+                "row_number": data.get('row_number', 2) if data else 2,
+                "Company Name": data.get('company', '') if data else '',
+                "Status": "Error",
+                **{f"SDE {i} Name": "" for i in range(1, 6)},
+                **{f"SDE {i} URL": "" for i in range(1, 6)},
+                **{f"HR {i} Name": "" for i in range(1, 3)},
+                **{f"HR {i} URL": "" for i in range(1, 3)}
+            }]
+        }), 200
+
+def scrape_with_selenium(company_name, row_number):
+    """Main scraping function with optimized Chrome settings"""
     
-    company_name = data['company']
-    row_number = data.get('row_number', 2)  # Default to 2 if not provided
-    
-    # Define search queries for different roles
+    # Define search queries
     sde_query = f'site:linkedin.com/in/ "Software Engineer" "{company_name}" "India"'
     hr_queries = [
         f'site:linkedin.com/in/ "Talent Acquisition" "{company_name}" "India"',
@@ -43,84 +92,93 @@ def scrape_linkedin_profiles():
         f'site:linkedin.com/in/ "Recruiter" "{company_name}" "India"'
     ]
     
-    # Create Chrome options for production/headless environment
+    # Chrome options - different for Windows vs Linux/Production
     options = webdriver.ChromeOptions()
     
-    # Production settings for Render
-    options.add_argument('--headless')  # Run in headless mode
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('--disable-extensions')
-    options.add_argument('--disable-logging')
-    options.add_argument('--disable-web-security')
-    options.add_argument('--ignore-certificate-errors')
-    options.add_argument('--allow-running-insecure-content')
+    # Check if we're on Windows (development) or Linux (production)
+    is_windows = platform.system() == 'Windows'
+    
+    if is_windows:
+        # Windows development settings
+        options.add_argument('--headless')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--window-size=1024,768')
+    else:
+        # Linux production settings (more aggressive)
+        options.add_argument('--headless=new')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-plugins')
+        options.add_argument('--disable-images')
+        options.add_argument('--disable-web-security')
+        options.add_argument('--memory-pressure-off')
+        options.add_argument('--max_old_space_size=512')
+        options.add_argument('--window-size=1024,768')
+    
+    # Common settings
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument('--window-size=1920,1080')
-    
-    # User agent
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ]
-    options.add_argument(f'--user-agent={random.choice(user_agents)}')
+    options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-    # Skip creating temporary profile for production
     driver = None
     try:
+        print("Starting Chrome driver...")
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        wait = WebDriverWait(driver, 15)
+        
+        # Set timeouts
+        driver.set_page_load_timeout(20)
+        driver.implicitly_wait(5)
+        wait = WebDriverWait(driver, 10)
 
-        print("Navigating to Google homepage...")
+        print("Navigating to Google...")
         driver.get("https://www.google.com")
-        time.sleep(3)
+        time.sleep(2)
 
-        # Handle cookie consent
+        # Handle cookie consent quickly
         handle_cookie_consent(driver, wait)
         
-        # Check for CAPTCHA
+        # Quick CAPTCHA check
         if is_captcha_or_blocked(driver):
-            print("Detected CAPTCHA. Please solve it manually.")
-            input("Press Enter after solving CAPTCHA...")
-            time.sleep(2)
+            print("CAPTCHA detected - returning empty results")
+            return create_empty_result(company_name, row_number, "CAPTCHA detected")
 
-        # Scrape Software Engineers (5 profiles)
-        print(f"=== SEARCHING FOR SOFTWARE ENGINEERS ===")
-        sde_profiles = improved_scrape_google(driver, wait, sde_query, 5)
+        # Scrape Software Engineers
+        print("=== SEARCHING FOR SOFTWARE ENGINEERS ===")
+        sde_profiles = quick_scrape_google(driver, wait, sde_query, 5)
         
-        # Add delay between searches to avoid being blocked
-        time.sleep(random.uniform(3, 6))
+        # Quick delay
+        time.sleep(1)
         
-        # Scrape HR/Talent Acquisition profiles (2 profiles total)
-        print(f"=== SEARCHING FOR HR/TALENT ACQUISITION ===")
+        # Scrape HR profiles
+        print("=== SEARCHING FOR HR/TALENT ACQUISITION ===")
         hr_profiles = []
         
-        for hr_query in hr_queries:
+        for hr_query in hr_queries[:2]:  # Only try first 2 queries
             if len(hr_profiles) >= 2:
                 break
                 
             print(f"Trying HR query: {hr_query}")
-            hr_results = improved_scrape_google(driver, wait, hr_query, 3)
+            hr_results = quick_scrape_google(driver, wait, hr_query, 2)
             
-            # Add unique profiles
             for profile in hr_results:
                 if len(hr_profiles) >= 2:
                     break
                 if not any(existing['url'] == profile['url'] for existing in hr_profiles):
                     hr_profiles.append(profile)
             
-            # Add delay between HR queries
-            if len(hr_profiles) < 2 and hr_query != hr_queries[-1]:
-                time.sleep(random.uniform(2, 4))
+            if len(hr_profiles) < 2 and hr_query != hr_queries[1]:
+                time.sleep(1)
         
-        # Format the response for Excel
+        # Format response
         excel_formatted = format_for_excel(company_name, row_number, sde_profiles, hr_profiles)
         
-        return jsonify({
+        return {
             "excel_data": excel_formatted,
             "debug": {
                 "sde_profiles_found": len(sde_profiles),
@@ -128,11 +186,11 @@ def scrape_linkedin_profiles():
                 "sde_profiles": sde_profiles,
                 "hr_profiles": hr_profiles
             }
-        })
+        }
 
     except Exception as e:
-        print(f"An overall error occurred: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"Scraping error: {e}")
+        return create_empty_result(company_name, row_number, f"Error: {str(e)}")
     finally:
         if driver:
             try:
@@ -140,20 +198,38 @@ def scrape_linkedin_profiles():
             except:
                 pass
 
+def create_empty_result(company_name, row_number, status):
+    """Create empty result structure"""
+    return {
+        "excel_data": [{
+            "row_number": row_number,
+            "Company Name": company_name,
+            "Status": status,
+            **{f"SDE {i} Name": "" for i in range(1, 6)},
+            **{f"SDE {i} URL": "" for i in range(1, 6)},
+            **{f"HR {i} Name": "" for i in range(1, 3)},
+            **{f"HR {i} URL": "" for i in range(1, 3)}
+        }],
+        "debug": {
+            "sde_profiles_found": 0,
+            "hr_profiles_found": 0,
+            "sde_profiles": [],
+            "hr_profiles": []
+        }
+    }
 
 def format_for_excel(company_name, row_number, sde_profiles, hr_profiles):
     """Format the scraped data for Excel import"""
     excel_row = {
         "row_number": row_number,
         "Company Name": company_name,
-        "Status": "Pending"
+        "Status": "Completed"
     }
     
     # Add SDE profiles (up to 5)
     for i in range(5):
         sde_num = i + 1
         if i < len(sde_profiles):
-            # Clean the name - remove extra job title info
             clean_name = clean_profile_name(sde_profiles[i]['name'])
             excel_row[f"SDE {sde_num} Name"] = clean_name
             excel_row[f"SDE {sde_num} URL"] = sde_profiles[i]['url']
@@ -165,7 +241,6 @@ def format_for_excel(company_name, row_number, sde_profiles, hr_profiles):
     for i in range(2):
         hr_num = i + 1
         if i < len(hr_profiles):
-            # Clean the name - remove extra job title info
             clean_name = clean_profile_name(hr_profiles[i]['name'])
             excel_row[f"HR {hr_num} Name"] = clean_name
             excel_row[f"HR {hr_num} URL"] = hr_profiles[i]['url']
@@ -175,335 +250,175 @@ def format_for_excel(company_name, row_number, sde_profiles, hr_profiles):
     
     return [excel_row]
 
-
 def clean_profile_name(name):
     """Clean profile name by removing job titles and extra information"""
     if not name:
         return ""
     
-    # Remove common job title patterns
     patterns_to_remove = [
-        r' - .*',  # Everything after first dash
-        r' \| .*',  # Everything after pipe
-        r' @ .*',   # Everything after @
-        r' at .*',  # Everything after 'at'
-        r'\(.*\)',  # Everything in parentheses
+        r' - .*',  r' \| .*',  r' @ .*',   r' at .*',  r'\(.*\)',
     ]
     
     cleaned_name = name
     for pattern in patterns_to_remove:
         cleaned_name = re.sub(pattern, '', cleaned_name, flags=re.IGNORECASE)
     
-    # Clean up extra spaces and capitalize properly
     cleaned_name = ' '.join(cleaned_name.split())
     
-    # If name becomes too short after cleaning, use original
     if len(cleaned_name.strip()) < 3:
         return name.strip()
     
     return cleaned_name.strip()
 
-
 def handle_cookie_consent(driver, wait):
-    """Handle Google's cookie consent popup"""
+    """Handle Google's cookie consent popup quickly"""
     try:
-        consent_selectors = [
-            '//button[contains(text(), "Accept all")]',
-            '//button[contains(text(), "I agree")]',
-            '//button[@id="L2AGLb"]'
-        ]
+        consent_selectors = ['//button[@id="L2AGLb"]', '//button[contains(text(), "Accept")]']
         
         for selector in consent_selectors:
             try:
-                consent_button = WebDriverWait(driver, 3).until(
+                consent_button = WebDriverWait(driver, 2).until(
                     EC.element_to_be_clickable((By.XPATH, selector))
                 )
-                print("Cookie consent button found. Clicking...")
                 consent_button.click()
-                time.sleep(2)
+                time.sleep(1)
                 return True
             except:
                 continue
-        
-        print("No cookie consent popup found")
         return False
-                
-    except Exception as e:
-        print(f"Error handling cookie consent: {e}")
+    except:
         return False
-
 
 def is_captcha_or_blocked(driver):
-    """Check if the current page is a CAPTCHA or blocking page"""
+    """Quick CAPTCHA check"""
     page_text = driver.page_source.lower()
-    blocking_indicators = [
-        "unusual traffic",
-        "captcha",
-        "i'm not a robot",
-        "verify you are human",
-        "recaptcha",
-        "our systems have detected"
-    ]
-    
-    return any(indicator in page_text for indicator in blocking_indicators)
-
-
-def human_like_typing(element, text):
-    """Type text in a more human-like manner"""
-    for char in text:
-        element.send_keys(char)
-        time.sleep(random.uniform(0.05, 0.15))
-
+    return any(indicator in page_text for indicator in ["unusual traffic", "captcha", "recaptcha"])
 
 def clean_google_url(url):
-    """Clean Google redirect URLs to get the actual LinkedIn URL"""
-    if not url:
+    """Clean Google redirect URLs"""
+    if not url or 'linkedin.com/in/' not in url:
         return None
     
-    # Direct LinkedIn URL
-    if 'linkedin.com/in/' in url and '/url?' not in url:
+    if '/url?' not in url:
         return url
     
-    # Google redirect URL
-    if '/url?' in url:
-        try:
-            parsed_url = urllib.parse.urlparse(url)
-            query_params = urllib.parse.parse_qs(parsed_url.query)
-            
-            # Try different parameter names
-            for param in ['url', 'q', 'sa']:
-                if param in query_params:
-                    decoded_url = urllib.parse.unquote(query_params[param][0])
-                    if 'linkedin.com/in/' in decoded_url:
-                        return decoded_url
-        except:
-            pass
-    
-    # Extract LinkedIn URL from any string
-    linkedin_pattern = r'https?://[^/]*linkedin\.com/in/[^/\s&]+'
-    match = re.search(linkedin_pattern, url)
-    if match:
-        return match.group(0)
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        
+        for param in ['url', 'q']:
+            if param in query_params:
+                decoded_url = urllib.parse.unquote(query_params[param][0])
+                if 'linkedin.com/in/' in decoded_url:
+                    return decoded_url.split('&')[0]  # Remove additional params
+    except:
+        pass
     
     return None
 
-
-def extract_profile_name(result_element):
-    """Extract profile name from various possible elements"""
-    name_selectors = [
-        'h3',                           # Main title
-        'h3 span',                      # Title spans
-        'h3 .LC20lb',                   # Google title class
-        '.LC20lb',                      # Direct title class
-        '.DKV0Md',                      # Google result title
-        'span[role="heading"]',         # Heading spans
-        'div[role="heading"]',          # Heading divs
-        '.yuRUbf h3',                   # Nested h3
-        '.tF2Cxc h3',                   # Alternative nested h3
-        'cite + h3',                    # H3 after cite
-        'a h3',                         # H3 inside links
-        'a span',                       # Spans inside links
-    ]
+def extract_profile_info(result_element):
+    """Extract both name and URL from result element"""
+    # Extract URL first
+    linkedin_url = None
+    links = result_element.find_elements(By.TAG_NAME, 'a')
+    
+    for link in links:
+        href = link.get_attribute('href')
+        cleaned_url = clean_google_url(href)
+        if cleaned_url:
+            linkedin_url = cleaned_url.split('?')[0].rstrip('/')
+            break
+    
+    if not linkedin_url:
+        return None, None
+    
+    # Extract name
+    name_selectors = ['h3', 'h3 span', '.LC20lb', '.DKV0Md']
+    profile_name = None
     
     for selector in name_selectors:
         try:
             elements = result_element.find_elements(By.CSS_SELECTOR, selector)
             for element in elements:
                 text = element.text.strip()
-                if text and 3 <= len(text) <= 100:
-                    # Clean up the name
-                    text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single
-                    text = text.replace(' - LinkedIn', '').replace('LinkedIn', '').strip()
-                    
-                    # Avoid generic text
-                    generic_terms = ['search', 'results', 'more', 'about', 'images', 'videos']
-                    if not any(term in text.lower() for term in generic_terms):
-                        return text
+                if text and 3 <= len(text) <= 100 and 'linkedin' not in text.lower():
+                    profile_name = re.sub(r'\s+', ' ', text)
+                    break
+            if profile_name:
+                break
         except:
             continue
     
-    return None
-
-
-def extract_linkedin_url_from_result(result_element):
-    """Extract LinkedIn URL from a search result element"""
-    # Find all links
-    links = result_element.find_elements(By.TAG_NAME, 'a')
+    # Fallback name from URL
+    if not profile_name and linkedin_url:
+        url_parts = linkedin_url.split('/')
+        if len(url_parts) > 4:
+            profile_name = url_parts[4].replace('-', ' ').title()
+        else:
+            profile_name = "LinkedIn Profile"
     
-    for link in links:
-        href = link.get_attribute('href')
-        cleaned_url = clean_google_url(href)
-        if cleaned_url and 'linkedin.com/in/' in cleaned_url:
-            return cleaned_url
-    
-    # Also check in data attributes and onclick handlers
+    return profile_name, linkedin_url
+
+def quick_scrape_google(driver, wait, query, max_results):
+    """Optimized scraping with shorter timeouts"""
     try:
-        onclick = result_element.get_attribute('onclick')
-        if onclick and 'linkedin.com/in/' in onclick:
-            linkedin_match = re.search(r'https?://[^/]*linkedin\.com/in/[^/\s&]+', onclick)
-            if linkedin_match:
-                return linkedin_match.group(0)
-    except:
-        pass
-    
-    # Check in the innerHTML for any LinkedIn URLs
-    try:
-        inner_html = result_element.get_attribute('innerHTML')
-        if inner_html and 'linkedin.com/in/' in inner_html:
-            linkedin_match = re.search(r'https?://[^/]*linkedin\.com/in/[^/\s&"\']+', inner_html)
-            if linkedin_match:
-                return clean_google_url(linkedin_match.group(0))
-    except:
-        pass
-    
-    return None
-
-
-def improved_scrape_google(driver, wait, query, max_results):
-    """Improved scraping with better URL and name extraction"""
-    try:
-        # Navigate to Google search
         driver.get("https://www.google.com")
-        time.sleep(3)
+        time.sleep(1)
         
-        # Find search box
+        # Find and use search box
         try:
             search_box = wait.until(EC.presence_of_element_located((By.NAME, "q")))
-            print("Found search box by name 'q'")
         except:
-            try:
-                search_box = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[title='Search']")))
-                print("Found search box by title 'Search'")
-            except:
-                search_box = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[name='q']")))
-                print("Found search box as textarea")
+            search_box = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[name='q']")))
         
-        # Search
         search_box.clear()
-        time.sleep(1)
-        human_like_typing(search_box, query)
-        time.sleep(1)
+        search_box.send_keys(query)
         search_box.send_keys(Keys.RETURN)
-        time.sleep(4)
+        time.sleep(2)
         
-        print(f"Current URL after search: {driver.current_url}")
-        
-        # Check for blocking
         if is_captcha_or_blocked(driver):
-            print("Hit CAPTCHA after search!")
             return []
         
-        # Wait for results and try multiple selectors
-        selectors_to_try = [
-            "div.g",                    # Standard Google results
-            ".tF2Cxc",                  # New Google layout
-            "div[data-ved]",            # Alternative with data-ved
-            ".yuRUbf",                  # Result wrapper
-            ".MjjYud",                  # Another Google class
-            "div.kvH3mc",               # Alternative class
-            "[jscontroller] .g",        # Nested results
-        ]
-        
+        # Find results with simpler selectors
+        selectors = ["div.g", ".tF2Cxc", "div[data-ved]"]
         search_results = []
-        used_selector = None
         
-        for selector in selectors_to_try:
+        for selector in selectors:
             try:
                 results = driver.find_elements(By.CSS_SELECTOR, selector)
                 if results:
-                    # Check if these contain LinkedIn content
-                    linkedin_count = 0
-                    for result in results[:5]:
-                        if 'linkedin.com' in result.get_attribute('outerHTML').lower():
-                            linkedin_count += 1
-                    
-                    print(f"Selector '{selector}': {len(results)} elements, {linkedin_count} with LinkedIn")
-                    
-                    if linkedin_count > 0:
-                        search_results = results
-                        used_selector = selector
-                        break
-            except Exception as e:
-                print(f"Selector '{selector}' failed: {e}")
+                    search_results = results[:max_results * 2]  # Get extra to filter
+                    break
+            except:
                 continue
         
         if not search_results:
-            print("No suitable search results found!")
             return []
-        
-        print(f"Using selector '{used_selector}' with {len(search_results)} results")
         
         profiles = []
         seen_urls = set()
         
-        for i, result in enumerate(search_results):
+        for result in search_results:
             if len(profiles) >= max_results:
                 break
                 
-            print(f"\n--- Processing result {i+1} ---")
-            
-            # Check if this result contains LinkedIn content
-            result_html = result.get_attribute('outerHTML')
-            if 'linkedin.com' not in result_html.lower():
-                print("  No LinkedIn content, skipping")
+            # Check for LinkedIn content
+            if 'linkedin.com' not in result.get_attribute('outerHTML').lower():
                 continue
             
-            # Extract LinkedIn URL
-            linkedin_url = extract_linkedin_url_from_result(result)
-            if not linkedin_url:
-                print("  No LinkedIn URL found")
+            name, url = extract_profile_info(result)
+            if not url or url in seen_urls:
                 continue
             
-            # Skip duplicates
-            if linkedin_url in seen_urls:
-                print(f"  Duplicate URL: {linkedin_url}")
-                continue
-            
-            # Extract profile name
-            profile_name = extract_profile_name(result)
-            if not profile_name:
-                print(f"  No name found for URL: {linkedin_url}")
-                # Use a fallback name based on URL
-                url_parts = linkedin_url.split('/')
-                if len(url_parts) > 4:
-                    profile_name = url_parts[4].replace('-', ' ').title()
-                else:
-                    profile_name = "LinkedIn Profile"
-            
-            # Clean up the LinkedIn URL (remove tracking parameters)
-            linkedin_url = linkedin_url.split('?')[0].rstrip('/')
-            
-            profile = {
-                "name": profile_name,
-                "url": linkedin_url
-            }
-            
-            profiles.append(profile)
-            seen_urls.add(linkedin_url)
-            
-            print(f"  ✓ Found: {profile_name} -> {linkedin_url}")
-        
-        print(f"\n=== FINAL RESULTS: Found {len(profiles)} unique profiles ===")
-        for i, profile in enumerate(profiles, 1):
-            print(f"  {i}. {profile['name']}: {profile['url']}")
+            profiles.append({"name": name, "url": url})
+            seen_urls.add(url)
         
         return profiles
                 
     except Exception as e:
-        print(f"Error in improved_scrape_google: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Quick scrape error: {e}")
         return []
 
-
 if __name__ == '__main__':
-    # Get port from environment variable (Render sets this)
     port = int(os.environ.get('PORT', 5001))
-    # Listen on all interfaces for production
     app.run(debug=False, host='0.0.0.0', port=port)
-
-# For local development:
-# python app.py
-#
-# For production (Render will use gunicorn):
-# gunicorn --bind 0.0.0.0:$PORT app:app

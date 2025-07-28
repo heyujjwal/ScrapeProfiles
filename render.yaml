@@ -1,0 +1,21 @@
+
+services:
+  - type: web
+    name: linkedin-scraper
+    env: docker
+    plan: starter  # Use starter plan for better resources
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: WEB_CONCURRENCY
+        value: 1
+    scaling:
+      minInstances: 1
+      maxInstances: 1
+    healthCheckPath: /health
+    buildCommand: ""
+    startCommand: ""
