@@ -118,89 +118,223 @@ def scrape_linkedin_profiles():
         }), 200
 
 def scrape_with_selenium(company_name, row_number):
-    """Main scraping function with optimized Chrome settings"""
+    """Main scraping function with multiple fallback strategies"""
     
-    # Define search queries
-    sde_query = f'site:linkedin.com/in/ "Software Engineer" "{company_name}" "India"'
-    hr_queries = [
-        f'site:linkedin.com/in/ "Talent Acquisition" "{company_name}" "India"',
-        f'site:linkedin.com/in/ "HR" "{company_name}" "India"',
-        f'site:linkedin.com/in/ "Human Resources" "{company_name}" "India"',
-        f'site:linkedin.com/in/ "Recruiter" "{company_name}" "India"'
+    # Try multiple approaches in order of preference
+    strategies = [
+        ("google_with_stealth", "Google with stealth mode"),
+        ("duckduckgo", "DuckDuckGo search"),
+        ("bing", "Bing search"),
+        ("google_basic", "Google basic (fallback)")
     ]
     
-    # Chrome options - different for Windows vs Linux/Production
+    for strategy_name, strategy_desc in strategies:
+        print(f"\n=== TRYING STRATEGY: {strategy_desc} ===")
+        
+        try:
+            if strategy_name == "google_with_stealth":
+                result = scrape_with_stealth_google(company_name, row_number)
+            elif strategy_name == "duckduckgo":
+                result = scrape_with_duckduckgo(company_name, row_number)
+            elif strategy_name == "bing":
+                result = scrape_with_bing(company_name, row_number)
+            else:  # google_basic
+                result = scrape_with_basic_google(company_name, row_number)
+            
+            # Check if we got results
+            if result and result.get("debug", {}).get("sde_profiles_found", 0) > 0:
+                print(f"SUCCESS with {strategy_desc}")
+                return result
+            else:
+                print(f"No results with {strategy_desc}, trying next strategy...")
+                
+        except Exception as e:
+            print(f"Strategy {strategy_desc} failed: {e}")
+            continue
+    
+    # If all strategies fail, return empty result
+    print("All strategies failed, returning empty result")
+    return create_empty_result(company_name, row_number, "All search strategies failed")
+
+def scrape_with_stealth_google(company_name, row_number):
+    """Advanced stealth mode for Google"""
     options = webdriver.ChromeOptions()
     
-    # Check if we're on Windows (development) or Linux (production)
-    is_windows = platform.system() == 'Windows'
+    # Stealth options
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
     
-    if is_windows:
-        # Windows development settings
-        options.add_argument('--headless')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--window-size=1024,768')
-    else:
-        # Linux production settings (less aggressive to avoid blocking)
-        options.add_argument('--headless=new')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-web-security')
-        options.add_argument('--window-size=1920,1080')  # Larger window
-        # Remove aggressive optimizations that might trigger detection
-        # options.add_argument('--disable-images')  # Removed
-        # options.add_argument('--memory-pressure-off')  # Removed
-    
-    # Common settings
+    # Anti-detection measures
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-
+    
+    # Realistic user agent
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    
+    # Additional stealth options
+    options.add_argument('--disable-extensions-file-access-check')
+    options.add_argument('--disable-extensions-http-throttling')
+    options.add_argument('--disable-client-side-phishing-detection')
+    
     driver = None
     try:
-        print("Starting Chrome driver...")
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        
+        # Execute stealth scripts
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+        driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
         
-        # Set timeouts
-        driver.set_page_load_timeout(20)
-        driver.implicitly_wait(5)
-        wait = WebDriverWait(driver, 10)
-
-        print("Navigating to Google...")
-        driver.get("https://www.google.com")
-        time.sleep(2)
-
-        # Handle cookie consent quickly
-        handle_cookie_consent(driver, wait)
+        return perform_search_operations(driver, company_name, row_number, "google")
         
-        # Quick CAPTCHA check
-        if is_captcha_or_blocked(driver):
-            print("CAPTCHA detected - returning empty results")
-            return create_empty_result(company_name, row_number, "CAPTCHA detected")
+    except Exception as e:
+        print(f"Stealth Google failed: {e}")
+        return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
 
-        # Scrape Software Engineers
+def scrape_with_duckduckgo(company_name, row_number):
+    """Use DuckDuckGo as alternative search engine"""
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+    
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        return perform_search_operations(driver, company_name, row_number, "duckduckgo")
+        
+    except Exception as e:
+        print(f"DuckDuckGo failed: {e}")
+        return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+
+def scrape_with_bing(company_name, row_number):
+    """Use Bing as alternative search engine"""
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+    
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        return perform_search_operations(driver, company_name, row_number, "bing")
+        
+    except Exception as e:
+        print(f"Bing failed: {e}")
+        return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+
+def scrape_with_basic_google(company_name, row_number):
+    """Basic Google scraping as last resort"""
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        return perform_search_operations(driver, company_name, row_number, "google")
+        
+    except Exception as e:
+        print(f"Basic Google failed: {e}")
+        return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+
+def perform_search_operations(driver, company_name, row_number, search_engine):
+    """Perform actual search operations based on search engine"""
+    
+    # Define queries
+    sde_query = f'site:linkedin.com/in/ "Software Engineer" "{company_name}" "India"'
+    hr_queries = [
+        f'site:linkedin.com/in/ "Talent Acquisition" "{company_name}" "India"',
+        f'site:linkedin.com/in/ "HR" "{company_name}" "India"'
+    ]
+    
+    driver.set_page_load_timeout(30)
+    driver.implicitly_wait(10)
+    wait = WebDriverWait(driver, 15)
+    
+    try:
+        # Navigate to search engine
+        if search_engine == "duckduckgo":
+            driver.get("https://duckduckgo.com")
+            time.sleep(3)
+        elif search_engine == "bing":
+            driver.get("https://www.bing.com")
+            time.sleep(3)
+        else:  # google
+            driver.get("https://www.google.com")
+            time.sleep(3)
+            
+            # Handle Google consent
+            handle_cookie_consent(driver, wait)
+        
+        # Check for blocking
+        if search_engine == "google" and is_captcha_or_blocked(driver):
+            print(f"{search_engine.upper()} is blocked")
+            return None
+        
+        print(f"Successfully accessed {search_engine.upper()}")
+        
+        # Search for SDE profiles
         print("=== SEARCHING FOR SOFTWARE ENGINEERS ===")
-        sde_profiles = quick_scrape_google(driver, wait, sde_query, 5)
+        if search_engine == "duckduckgo":
+            sde_profiles = search_duckduckgo(driver, wait, sde_query, 5)
+        elif search_engine == "bing":
+            sde_profiles = search_bing(driver, wait, sde_query, 5)
+        else:
+            sde_profiles = quick_scrape_google(driver, wait, sde_query, 5)
         
-        # Quick delay
-        time.sleep(1)
+        time.sleep(2)
         
-        # Scrape HR profiles
+        # Search for HR profiles
         print("=== SEARCHING FOR HR/TALENT ACQUISITION ===")
         hr_profiles = []
         
-        for hr_query in hr_queries[:2]:  # Only try first 2 queries
+        for hr_query in hr_queries:
             if len(hr_profiles) >= 2:
                 break
                 
             print(f"Trying HR query: {hr_query}")
-            hr_results = quick_scrape_google(driver, wait, hr_query, 2)
+            if search_engine == "duckduckgo":
+                hr_results = search_duckduckgo(driver, wait, hr_query, 2)
+            elif search_engine == "bing":
+                hr_results = search_bing(driver, wait, hr_query, 2)
+            else:
+                hr_results = quick_scrape_google(driver, wait, hr_query, 2)
             
             for profile in hr_results:
                 if len(hr_profiles) >= 2:
@@ -208,8 +342,7 @@ def scrape_with_selenium(company_name, row_number):
                 if not any(existing['url'] == profile['url'] for existing in hr_profiles):
                     hr_profiles.append(profile)
             
-            if len(hr_profiles) < 2 and hr_query != hr_queries[1]:
-                time.sleep(1)
+            time.sleep(1)
         
         # Format response
         excel_formatted = format_for_excel(company_name, row_number, sde_profiles, hr_profiles)
@@ -217,22 +350,127 @@ def scrape_with_selenium(company_name, row_number):
         return {
             "excel_data": excel_formatted,
             "debug": {
+                "search_engine_used": search_engine,
                 "sde_profiles_found": len(sde_profiles),
                 "hr_profiles_found": len(hr_profiles),
                 "sde_profiles": sde_profiles,
                 "hr_profiles": hr_profiles
             }
         }
-
+        
     except Exception as e:
-        print(f"Scraping error: {e}")
-        return create_empty_result(company_name, row_number, f"Error: {str(e)}")
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+        print(f"Search operations failed for {search_engine}: {e}")
+        return None
+
+def search_duckduckgo(driver, wait, query, max_results):
+    """Search using DuckDuckGo"""
+    try:
+        # Find search box
+        search_box = wait.until(EC.presence_of_element_located((By.ID, "searchbox_input")))
+        search_box.clear()
+        search_box.send_keys(query)
+        search_box.send_keys(Keys.RETURN)
+        time.sleep(3)
+        
+        # Find results
+        results = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='result']")[:max_results * 2]
+        
+        profiles = []
+        seen_urls = set()
+        
+        for result in results:
+            if len(profiles) >= max_results:
+                break
+                
+            if 'linkedin.com' not in result.get_attribute('outerHTML').lower():
+                continue
+            
+            name, url = extract_profile_info_generic(result)
+            if url and url not in seen_urls:
+                profiles.append({"name": name, "url": url})
+                seen_urls.add(url)
+        
+        return profiles
+        
+    except Exception as e:
+        print(f"DuckDuckGo search error: {e}")
+        return []
+
+def search_bing(driver, wait, query, max_results):
+    """Search using Bing"""
+    try:
+        # Find search box
+        search_box = wait.until(EC.presence_of_element_located((By.ID, "sb_form_q")))
+        search_box.clear()
+        search_box.send_keys(query)
+        search_box.send_keys(Keys.RETURN)
+        time.sleep(3)
+        
+        # Find results
+        results = driver.find_elements(By.CSS_SELECTOR, ".b_algo")[:max_results * 2]
+        
+        profiles = []
+        seen_urls = set()
+        
+        for result in results:
+            if len(profiles) >= max_results:
+                break
+                
+            if 'linkedin.com' not in result.get_attribute('outerHTML').lower():
+                continue
+            
+            name, url = extract_profile_info_generic(result)
+            if url and url not in seen_urls:
+                profiles.append({"name": name, "url": url})
+                seen_urls.add(url)
+        
+        return profiles
+        
+    except Exception as e:
+        print(f"Bing search error: {e}")
+        return []
+
+def extract_profile_info_generic(result_element):
+    """Generic profile extraction that works across search engines"""
+    # Extract URL
+    linkedin_url = None
+    links = result_element.find_elements(By.TAG_NAME, 'a')
+    
+    for link in links:
+        href = link.get_attribute('href')
+        if href and 'linkedin.com/in/' in href:
+            linkedin_url = clean_google_url(href) or href
+            break
+    
+    if not linkedin_url:
+        return None, None
+    
+    # Extract name from various elements
+    name_selectors = ['h3', 'h2', '.b_title', 'cite + h3', 'a h3']
+    profile_name = None
+    
+    for selector in name_selectors:
+        try:
+            elements = result_element.find_elements(By.CSS_SELECTOR, selector)
+            for element in elements:
+                text = element.text.strip()
+                if text and 3 <= len(text) <= 100 and 'linkedin' not in text.lower():
+                    profile_name = re.sub(r'\s+', ' ', text)
+                    break
+            if profile_name:
+                break
+        except:
+            continue
+    
+    # Fallback name from URL
+    if not profile_name and linkedin_url:
+        url_parts = linkedin_url.split('/')
+        if len(url_parts) > 4:
+            profile_name = url_parts[4].replace('-', ' ').title()
+        else:
+            profile_name = "LinkedIn Profile"
+    
+    return profile_name, linkedin_url
 
 def create_empty_result(company_name, row_number, status):
     """Create empty result structure"""
