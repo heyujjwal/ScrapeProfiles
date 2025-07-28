@@ -15,6 +15,15 @@ import re
 # Initialize the Flask app
 app = Flask(__name__)
 
+# Health check endpoint for Render
+@app.route('/', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy", "message": "LinkedIn Scraper API is running"}), 200
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
+
 # Define the /scrape endpoint
 @app.route('/scrape', methods=['POST'])
 def scrape_linkedin_profiles():
@@ -34,25 +43,32 @@ def scrape_linkedin_profiles():
         f'site:linkedin.com/in/ "Recruiter" "{company_name}" "India"'
     ]
     
-    # Create a temporary profile directory for automation
-    temp_profile_dir = os.path.join(os.getcwd(), "temp_chrome_profile")
-    
+    # Create Chrome options for production/headless environment
     options = webdriver.ChromeOptions()
-    options.add_argument('--headless') 
-    options.add_argument(f"--user-data-dir={temp_profile_dir}")
+    
+    # Production settings for Render
+    options.add_argument('--headless')  # Run in headless mode
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--disable-extensions')
+    options.add_argument('--disable-logging')
+    options.add_argument('--disable-web-security')
+    options.add_argument('--ignore-certificate-errors')
+    options.add_argument('--allow-running-insecure-content')
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument('--disable-extensions')
-    options.add_argument("--start-maximized")
+    options.add_argument('--window-size=1920,1080')
     
+    # User agent
     user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ]
     options.add_argument(f'--user-agent={random.choice(user_agents)}')
 
+    # Skip creating temporary profile for production
     driver = None
     try:
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
@@ -123,13 +139,6 @@ def scrape_linkedin_profiles():
                 driver.quit()
             except:
                 pass
-        
-        try:
-            import shutil
-            if os.path.exists(temp_profile_dir):
-                shutil.rmtree(temp_profile_dir, ignore_errors=True)
-        except:
-            pass
 
 
 def format_for_excel(company_name, row_number, sde_profiles, hr_profiles):
@@ -137,7 +146,7 @@ def format_for_excel(company_name, row_number, sde_profiles, hr_profiles):
     excel_row = {
         "row_number": row_number,
         "Company Name": company_name,
-        "Status": "Done"
+        "Status": "Pending"
     }
     
     # Add SDE profiles (up to 5)
@@ -488,9 +497,13 @@ def improved_scrape_google(driver, wait, query, max_results):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    # Get port from environment variable (Render sets this)
+    port = int(os.environ.get('PORT', 5001))
+    # Listen on all interfaces for production
+    app.run(debug=False, host='0.0.0.0', port=port)
 
-# Example API call:
-# curl -X POST http://localhost:5001/scrape \
-#   -H "Content-Type: application/json" \
-#   -d '{"company": "Microsoft", "row_number": 2}'
+# For local development:
+# python app.py
+#
+# For production (Render will use gunicorn):
+# gunicorn --bind 0.0.0.0:$PORT app:app
