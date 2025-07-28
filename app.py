@@ -55,8 +55,7 @@ def scrape_linkedin_profiles():
 
     driver = None
     try:
-        # Selenium will automatically find the driver installed by the Dockerfile
-        driver = webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         wait = WebDriverWait(driver, 15)
 
@@ -70,7 +69,7 @@ def scrape_linkedin_profiles():
         # Check for CAPTCHA
         if is_captcha_or_blocked(driver):
             print("Detected CAPTCHA. Please solve it manually.")
-            # input("Press Enter after solving CAPTCHA...")
+            input("Press Enter after solving CAPTCHA...")
             time.sleep(2)
 
         # Scrape Software Engineers (5 profiles)
