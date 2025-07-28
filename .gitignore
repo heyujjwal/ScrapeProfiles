@@ -24,3 +24,4 @@ MANIFEST
 temp_chrome_profile/
 debug_page.html
 full_page_debug.html
+render.yaml
