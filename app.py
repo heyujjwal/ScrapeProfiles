@@ -34,6 +34,43 @@ def health_check():
 def health():
     return jsonify({"status": "ok"}), 200
 
+@app.route('/test-google', methods=['GET'])
+def test_google_access():
+    """Test endpoint to check Google access from production"""
+    options = webdriver.ChromeOptions()
+    options.add_argument('--headless=new')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    
+    driver = None
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        driver.get("https://www.google.com")
+        time.sleep(3)
+        
+        result = {
+            "url": driver.current_url,
+            "title": driver.title,
+            "blocked": is_captcha_or_blocked(driver),
+            "has_search_box": len(driver.find_elements(By.NAME, "q")) > 0,
+            "page_length": len(driver.page_source)
+        }
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+
 # Define the /scrape endpoint with timeout protection
 @app.route('/scrape', methods=['POST'])
 def scrape_linkedin_profiles():
@@ -106,18 +143,17 @@ def scrape_with_selenium(company_name, row_number):
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--window-size=1024,768')
     else:
-        # Linux production settings (more aggressive)
+        # Linux production settings (less aggressive to avoid blocking)
         options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-extensions')
-        options.add_argument('--disable-plugins')
-        options.add_argument('--disable-images')
         options.add_argument('--disable-web-security')
-        options.add_argument('--memory-pressure-off')
-        options.add_argument('--max_old_space_size=512')
-        options.add_argument('--window-size=1024,768')
+        options.add_argument('--window-size=1920,1080')  # Larger window
+        # Remove aggressive optimizations that might trigger detection
+        # options.add_argument('--disable-images')  # Removed
+        # options.add_argument('--memory-pressure-off')  # Removed
     
     # Common settings
     options.add_argument('--disable-blink-features=AutomationControlled')
@@ -290,9 +326,61 @@ def handle_cookie_consent(driver, wait):
         return False
 
 def is_captcha_or_blocked(driver):
-    """Quick CAPTCHA check"""
-    page_text = driver.page_source.lower()
-    return any(indicator in page_text for indicator in ["unusual traffic", "captcha", "recaptcha"])
+    """Enhanced blocking detection with detailed logging"""
+    try:
+        page_text = driver.page_source.lower()
+        page_title = driver.title.lower()
+        current_url = driver.current_url.lower()
+        
+        blocking_indicators = [
+            "unusual traffic",
+            "captcha", 
+            "i'm not a robot",
+            "verify you are human",
+            "recaptcha",
+            "our systems have detected",
+            "automated queries",
+            "robot",
+            "suspicious activity"
+        ]
+        
+        # Check page content
+        for indicator in blocking_indicators:
+            if indicator in page_text:
+                print(f"BLOCKING DETECTED: Found '{indicator}' in page content")
+                return True
+            if indicator in page_title:
+                print(f"BLOCKING DETECTED: Found '{indicator}' in page title")
+                return True
+        
+        # Check URL for blocking patterns
+        blocking_url_patterns = [
+            "sorry.google.com",
+            "ipv4.google.com",
+            "ipv6.google.com",
+            "consent.google.com"
+        ]
+        
+        for pattern in blocking_url_patterns:
+            if pattern in current_url:
+                print(f"BLOCKING DETECTED: URL contains '{pattern}'")
+                return True
+        
+        # Check for absence of search elements (indicating a blocked page)
+        try:
+            search_elements = driver.find_elements(By.NAME, "q")
+            if not search_elements:
+                print("POTENTIAL BLOCKING: No search box found")
+                # Don't return True here as this might be a false positive
+        except:
+            pass
+        
+        print("No blocking detected")
+        return False
+        
+    except Exception as e:
+        print(f"Error checking for blocking: {e}")
+        return False
 
 def clean_google_url(url):
     """Clean Google redirect URLs"""
@@ -360,63 +448,154 @@ def extract_profile_info(result_element):
     return profile_name, linkedin_url
 
 def quick_scrape_google(driver, wait, query, max_results):
-    """Optimized scraping with shorter timeouts"""
+    """Optimized scraping with enhanced debugging and error handling"""
     try:
+        print(f"Starting search for: {query}")
         driver.get("https://www.google.com")
-        time.sleep(1)
-        
-        # Find and use search box
-        try:
-            search_box = wait.until(EC.presence_of_element_located((By.NAME, "q")))
-        except:
-            search_box = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[name='q']")))
-        
-        search_box.clear()
-        search_box.send_keys(query)
-        search_box.send_keys(Keys.RETURN)
         time.sleep(2)
         
+        # Check current page content
+        current_url = driver.current_url
+        page_title = driver.title
+        print(f"Current URL: {current_url}")
+        print(f"Page title: {page_title}")
+        
+        # Check if we're blocked before searching
         if is_captcha_or_blocked(driver):
+            print("BLOCKED: Detected blocking before search")
             return []
         
-        # Find results with simpler selectors
-        selectors = ["div.g", ".tF2Cxc", "div[data-ved]"]
+        # Find and use search box with better error handling
+        search_box = None
+        search_selectors = [
+            (By.NAME, "q"),
+            (By.CSS_SELECTOR, "textarea[name='q']"),
+            (By.CSS_SELECTOR, "input[name='q']"),
+            (By.CSS_SELECTOR, "textarea[title='Search']"),
+            (By.CSS_SELECTOR, "input[title='Search']")
+        ]
+        
+        for by, selector in search_selectors:
+            try:
+                search_box = wait.until(EC.presence_of_element_located((by, selector)))
+                print(f"Found search box with selector: {selector}")
+                break
+            except:
+                continue
+        
+        if not search_box:
+            print("ERROR: Could not find search box")
+            return []
+        
+        # Perform search with human-like typing
+        search_box.clear()
+        time.sleep(0.5)
+        
+        # Type slowly to avoid detection
+        for char in query:
+            search_box.send_keys(char)
+            time.sleep(random.uniform(0.05, 0.1))
+        
+        time.sleep(1)
+        search_box.send_keys(Keys.RETURN)
+        time.sleep(3)
+        
+        # Check URL after search
+        search_url = driver.current_url
+        print(f"Search URL: {search_url}")
+        
+        # Enhanced blocking check
+        if is_captcha_or_blocked(driver):
+            print("BLOCKED: Detected blocking after search")
+            print("Page source snippet:", driver.page_source[:500])
+            return []
+        
+        # Wait for results to load
+        time.sleep(2)
+        
+        # Try multiple result selectors with detailed logging
+        selectors = [
+            "div.g",           # Standard results
+            ".tF2Cxc",         # New Google layout  
+            "div[data-ved]",   # Alternative
+            ".yuRUbf",         # Result wrapper
+            ".MjjYud",         # Another class
+            "div.kvH3mc"       # Alternative
+        ]
+        
         search_results = []
+        used_selector = None
         
         for selector in selectors:
             try:
                 results = driver.find_elements(By.CSS_SELECTOR, selector)
+                print(f"Selector '{selector}': found {len(results)} elements")
+                
                 if results:
-                    search_results = results[:max_results * 2]  # Get extra to filter
-                    break
-            except:
+                    # Check if any contain LinkedIn
+                    linkedin_count = 0
+                    for result in results[:5]:
+                        if 'linkedin.com' in result.get_attribute('outerHTML').lower():
+                            linkedin_count += 1
+                    
+                    print(f"LinkedIn results found: {linkedin_count}")
+                    
+                    if linkedin_count > 0:
+                        search_results = results[:max_results * 3]  # Get more for filtering
+                        used_selector = selector
+                        break
+            except Exception as e:
+                print(f"Selector '{selector}' failed: {e}")
                 continue
         
         if not search_results:
+            print("ERROR: No search results found with any selector")
+            # Debug: Print page source snippet
+            page_source = driver.page_source
+            print("Page source length:", len(page_source))
+            if len(page_source) > 0:
+                print("Page source snippet:", page_source[:1000])
             return []
+        
+        print(f"Processing {len(search_results)} results with selector '{used_selector}'")
         
         profiles = []
         seen_urls = set()
         
-        for result in search_results:
+        for i, result in enumerate(search_results):
             if len(profiles) >= max_results:
                 break
                 
+            print(f"Processing result {i+1}")
+            
             # Check for LinkedIn content
-            if 'linkedin.com' not in result.get_attribute('outerHTML').lower():
+            result_html = result.get_attribute('outerHTML')
+            if 'linkedin.com' not in result_html.lower():
+                print(f"  No LinkedIn content in result {i+1}")
                 continue
             
             name, url = extract_profile_info(result)
-            if not url or url in seen_urls:
+            print(f"  Extracted: name='{name}', url='{url}'")
+            
+            if not url:
+                print(f"  No URL found in result {i+1}")
+                continue
+                
+            if url in seen_urls:
+                print(f"  Duplicate URL: {url}")
                 continue
             
             profiles.append({"name": name, "url": url})
             seen_urls.add(url)
+            print(f"  ✓ Added profile: {name}")
         
+        print(f"Final result: {len(profiles)} profiles found")
         return profiles
                 
     except Exception as e:
         print(f"Quick scrape error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 if __name__ == '__main__':
