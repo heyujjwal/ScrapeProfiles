@@ -52,7 +52,7 @@ CMD gunicorn --bind 0.0.0.0:$PORT \
     --workers 1 \
     --worker-class sync \
     --timeout 300 \
-    --keep-alive 2 \ ANTI-CAPTCHA / S
+    --keep-alive 2 \
     --max-requests 50 \
     --max-requests-jitter 5 \
     --worker-tmp-dir /dev/shm \
